@@ -1,0 +1,6 @@
+Raspberry Pi Version: Raspberry Pi 4 Model B
+GPS Module: LC29H(AA)
+Thermocouple Breakout Module: MAX31855
+RGB Camera: IMX219 (Picamera2)
+Thermal Camera: MLX90640
+Software Version: v2.2
