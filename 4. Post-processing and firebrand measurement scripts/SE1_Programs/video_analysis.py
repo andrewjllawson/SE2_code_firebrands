@@ -1,0 +1,475 @@
+"""
+
+Updated on Mar 25 2026
+
+@author: Andrew Lawson
+
+Video analysis script edited to run from a single RGB video only.
+No metadata file is required; timestamps are generated from video FPS.
+
+"""
+
+import sys
+import cv2
+import numpy as np
+import pandas as pd
+import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk
+import atexit
+import os
+from scipy.optimize import linear_sum_assignment
+
+if len(sys.argv) < 2:
+    print("Error: No RGB video file provided.")
+    print("Usage: python script.py path/to/video.mp4")
+    sys.exit(1)
+
+rgb_video_path = sys.argv[1]
+
+if not os.path.isfile(rgb_video_path):
+    print(f"Error: Video file not found: {rgb_video_path}")
+    sys.exit(1)
+
+# ------------------------
+# Output folder + names
+# ------------------------
+video_dir = os.path.dirname(rgb_video_path)
+video_base = os.path.splitext(os.path.basename(rgb_video_path))[0]
+
+output_csv_path = os.path.join(video_dir, f"{video_base}_analysis.csv")
+output_rgb_video_path = os.path.join(video_dir, f"{video_base}_processed.mp4")
+
+print(f"Input video: {rgb_video_path}")
+print(f"Output CSV: {output_csv_path}")
+print(f"Output video: {output_rgb_video_path}")
+
+# ------------------------
+# Camera Calibration Parameters (pixels per millimeter)
+# ------------------------
+HORIZONTAL_PPM = 2.67
+VERTICAL_PPM = 8
+
+# ------------------------
+# GUI Display Parameters
+# ------------------------
+DISPLAY_WIDTH = 320
+DISPLAY_HEIGHT = 240
+
+# Global variable to store tracking results
+results = []
+
+# ------------------------
+# Initialize video capture for RGB video
+# ------------------------
+rgb_cap = cv2.VideoCapture(rgb_video_path)
+
+if not rgb_cap.isOpened():
+    print("Error: Could not open RGB video file.")
+    sys.exit(1)
+
+rgb_fps = rgb_cap.get(cv2.CAP_PROP_FPS)
+rgb_frame_width = int(rgb_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+rgb_frame_height = int(rgb_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+rgb_frame_count_total = int(rgb_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+if rgb_fps <= 0:
+    print("Error: Could not determine FPS from video.")
+    sys.exit(1)
+
+# Generate timestamps directly from FPS
+rgb_timestamps = np.arange(rgb_frame_count_total) / rgb_fps
+
+# ------------------------
+# Improved Tracking Parameters
+# ------------------------
+MIN_AREA = 5
+MAX_MISSED = 5
+COST_THRESHOLD = 3.0
+MIN_CONFIRM_AGE = 3
+
+# ------------------------
+# Tracking state
+# ------------------------
+tracks = {}
+pending_tracks = {}
+next_track_id = 0
+pending_counter = 0
+
+# ------------------------
+# Background subtraction
+# ------------------------
+backSub = cv2.createBackgroundSubtractorMOG2(
+    history=500,
+    varThreshold=80,
+    detectShadows=False
+)
+
+# ------------------------
+# Tkinter setup
+# ------------------------
+root = tk.Tk()
+root.title("RGB Video Firebrand Tracking")
+
+frame_count = 0
+playing = True
+rgb_img = None
+rgb_frame = None
+
+frame_container = tk.Frame(root)
+frame_container.pack()
+
+rgb_label = tk.Label(frame_container, width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT)
+rgb_label.pack(side=tk.LEFT)
+
+rgb_frame_count = 0
+
+# ------------------------
+# Helpers
+# ------------------------
+def create_kalman_filter():
+    kf = cv2.KalmanFilter(4, 2)
+    kf.transitionMatrix = np.array([
+        [1, 0, 1, 0],
+        [0, 1, 0, 1],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ], dtype=np.float32)
+    kf.measurementMatrix = np.array([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0]
+    ], dtype=np.float32)
+    kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-4
+    kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-3
+    kf.errorCovPost = np.eye(4, dtype=np.float32)
+    return kf
+
+def get_center(bbox):
+    x, y, w, h = bbox
+    return (x + w / 2, y + h / 2)
+
+def iou(bbox1, bbox2):
+    x1, y1, w1, h1 = bbox1
+    x2, y2, w2, h2 = bbox2
+
+    xi1 = max(x1, x2)
+    yi1 = max(y1, y2)
+    xi2 = min(x1 + w1, x2 + w2)
+    yi2 = min(y1 + h1, y2 + h2)
+
+    inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+    union_area = (w1 * h1) + (w2 * h2) - inter_area
+
+    return 0 if union_area == 0 else inter_area / union_area
+
+class Track:
+    def __init__(self, initial_bbox, track_id):
+        self.track_id = track_id
+        self.kf = create_kalman_filter()
+        self.missed_frames = 0
+        self.age = 1
+        self.bbox = initial_bbox
+        self.update(initial_bbox)
+
+    def update(self, bbox):
+        self.bbox = bbox
+        cx, cy = get_center(bbox)
+        measurement = np.array([[np.float32(cx)], [np.float32(cy)]])
+        self.kf.correct(measurement)
+        self.missed_frames = 0
+        self.age += 1
+
+    def predict(self):
+        prediction = self.kf.predict()
+        px, py = float(prediction[0]), float(prediction[1])
+        x, y, w, h = self.bbox
+        new_x = px - w / 2
+        new_y = py - h / 2
+        self.bbox = (new_x, new_y, w, h)
+        return self.bbox
+
+# ------------------------
+# Save results
+# ------------------------
+def save_data():
+    global results, output_csv_path
+
+    if not results:
+        print("No results to save.")
+        return
+
+    df = pd.DataFrame(results)
+    df = df[[
+        "frame", "object_id", "rgb_time",
+        "x", "y", "w", "h",
+        "bbox_width_pixels", "bbox_height_pixels",
+        "bbox_width_mm", "bbox_height_mm"
+    ]]
+    df.to_csv(output_csv_path, index=False)
+
+    unique_firebrands = df["object_id"].nunique()
+    print(f"Results saved to {output_csv_path}")
+    print(f"Unique tracked firebrands detected: {unique_firebrands}")
+
+def on_exit():
+    global rgb_out
+
+    save_data()
+
+    if rgb_out is not None:
+        rgb_out.release()
+        print(f"Processed RGB video saved to {output_rgb_video_path}")
+
+# ------------------------
+# Frame update loop
+# ------------------------
+def update_frame():
+    global frame_count, rgb_frame_count, rgb_frame, rgb_img
+    global results, rgb_out, tracks, pending_tracks, next_track_id, pending_counter
+
+    if rgb_frame_count >= len(rgb_timestamps):
+        print("Reached end of video. Stopping.")
+        save_data()
+        if rgb_out is not None:
+            rgb_out.release()
+            print(f"Processed RGB video saved to {output_rgb_video_path}")
+        stop_video()
+        root.quit()
+        return
+
+    ret_rgb, rgb_frame = rgb_cap.read()
+    if not ret_rgb:
+        print("End of RGB video.")
+        save_data()
+        if rgb_out is not None:
+            rgb_out.release()
+            print(f"Processed RGB video saved to {output_rgb_video_path}")
+        on_exit()
+        return
+
+    rgb_time = rgb_timestamps[rgb_frame_count]
+    rgb_frame_count += 1
+
+    # Preprocess frame
+    blurred = cv2.GaussianBlur(rgb_frame, (5, 5), 0)
+    gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
+
+    fg_mask = backSub.apply(gray)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    fg_mask = cv2.dilate(fg_mask, kernel, iterations=1)
+
+    cv2.imshow("Foreground Mask", fg_mask)
+
+    # Extract detections
+    contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    detections = []
+
+    for cnt in contours:
+        if cv2.contourArea(cnt) < MIN_AREA:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        detections.append((x, y, w, h))
+
+    # Predict existing tracks
+    for track in tracks.values():
+        track.predict()
+
+    track_ids = list(tracks.keys())
+    num_tracks = len(track_ids)
+    num_dets = len(detections)
+
+    cost_matrix = np.zeros((num_tracks, num_dets), dtype=np.float32)
+    for i, t_id in enumerate(track_ids):
+        for j, det in enumerate(detections):
+            cost_matrix[i, j] = 1 - iou(tracks[t_id].bbox, det)
+
+    assigned_tracks = set()
+    assigned_detections = set()
+
+    if num_tracks > 0 and num_dets > 0:
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        for r, c in zip(row_ind, col_ind):
+            cost = cost_matrix[r, c]
+            if cost < COST_THRESHOLD:
+                t_id = track_ids[r]
+                tracks[t_id].update(detections[c])
+                assigned_tracks.add(t_id)
+                assigned_detections.add(c)
+
+    # Handle unassigned detections as pending tracks
+    for j, det in enumerate(detections):
+        if j not in assigned_detections:
+            found = False
+            for temp_id, (pending_bbox, count) in list(pending_tracks.items()):
+                if iou(pending_bbox, det) > 0.5:
+                    pending_tracks[temp_id] = (det, count + 1)
+                    found = True
+                    break
+            if not found:
+                temp_id = f"pending_{pending_counter}"
+                pending_counter += 1
+                pending_tracks[temp_id] = (det, 1)
+
+    # Confirm pending tracks
+    for temp_id, (bbox, count) in list(pending_tracks.items()):
+        if count >= MIN_CONFIRM_AGE:
+            tracks[next_track_id] = Track(bbox, next_track_id)
+            next_track_id += 1
+            del pending_tracks[temp_id]
+
+    # Age unmatched tracks
+    for t_id in track_ids:
+        if t_id not in assigned_tracks:
+            tracks[t_id].missed_frames += 1
+
+    # Remove dead tracks
+    to_remove = [t_id for t_id, track in tracks.items() if track.missed_frames > MAX_MISSED]
+    for t_id in to_remove:
+        del tracks[t_id]
+
+    # Draw + log confirmed tracks
+    for t_id, track in tracks.items():
+        if track.age < MIN_CONFIRM_AGE:
+            continue
+
+        x, y, w, h = track.bbox
+
+        cv2.rectangle(
+            rgb_frame,
+            (int(x), int(y)),
+            (int(x + w), int(y + h)),
+            (0, 255, 0),
+            2
+        )
+        cv2.putText(
+            rgb_frame,
+            f"ID {t_id}",
+            (int(x), int(y) - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 255, 0),
+            2
+        )
+
+        width_mm = w / HORIZONTAL_PPM
+        height_mm = h / VERTICAL_PPM
+
+        results.append({
+            "frame": frame_count,
+            "object_id": t_id,
+            "rgb_time": rgb_time,
+            "x": float(x),
+            "y": float(y),
+            "w": float(w),
+            "h": float(h),
+            "bbox_width_pixels": float(w),
+            "bbox_height_pixels": float(h),
+            "bbox_width_mm": round(width_mm, 2),
+            "bbox_height_mm": round(height_mm, 2),
+        })
+
+    # Display in Tkinter
+    rgb_frame_resized = cv2.resize(rgb_frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+    rgb_img = cv2.cvtColor(rgb_frame_resized, cv2.COLOR_BGR2RGB)
+    rgb_img = Image.fromarray(rgb_img)
+    rgb_img = ImageTk.PhotoImage(rgb_img)
+    rgb_label.config(image=rgb_img)
+    rgb_label.image = rgb_img
+
+    # Save processed frame
+    if rgb_out is not None:
+        rgb_out.write(rgb_frame)
+
+    if playing:
+        frame_count += 1
+        root.after(30, update_frame)
+
+    cv2.waitKey(1)
+
+def play_video():
+    global playing
+    playing = True
+    update_frame()
+
+def pause_video():
+    global playing
+    playing = False
+
+def stop_video():
+    global playing, frame_count, rgb_frame_count
+    global tracks, pending_tracks, next_track_id, pending_counter
+
+    playing = False
+    frame_count = 0
+    rgb_frame_count = 0
+    rgb_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    tracks = {}
+    pending_tracks = {}
+    next_track_id = 0
+    pending_counter = 0
+
+def forward_frame():
+    global frame_count, rgb_frame_count
+    pause_video()
+    frame_count += 1
+    rgb_frame_count += 1
+    rgb_cap.set(cv2.CAP_PROP_POS_FRAMES, rgb_frame_count)
+    update_frame()
+
+def backward_frame():
+    global frame_count, rgb_frame_count
+    pause_video()
+    frame_count = max(0, frame_count - 1)
+    rgb_frame_count = max(0, rgb_frame_count - 1)
+    rgb_cap.set(cv2.CAP_PROP_POS_FRAMES, rgb_frame_count)
+    update_frame()
+
+# ------------------------
+# Video writer
+# ------------------------
+try:
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    rgb_out = cv2.VideoWriter(
+        output_rgb_video_path,
+        fourcc,
+        rgb_fps,
+        (rgb_frame_width, rgb_frame_height)
+    )
+except Exception as e:
+    print(f"Error initializing video writer: {e}")
+    rgb_out = None
+
+# ------------------------
+# Controls
+# ------------------------
+button_container = tk.Frame(root)
+button_container.pack(side=tk.BOTTOM, pady=10)
+
+play_button = ttk.Button(button_container, text="Play", command=play_video)
+play_button.pack(side=tk.LEFT, padx=5)
+
+pause_button = ttk.Button(button_container, text="Pause", command=pause_video)
+pause_button.pack(side=tk.LEFT, padx=5)
+
+stop_button = ttk.Button(button_container, text="Stop", command=stop_video)
+stop_button.pack(side=tk.LEFT, padx=5)
+
+forward_button = ttk.Button(button_container, text="Forward", command=forward_frame)
+forward_button.pack(side=tk.LEFT, padx=5)
+
+backward_button = ttk.Button(button_container, text="Backward", command=backward_frame)
+backward_button.pack(side=tk.LEFT, padx=5)
+
+save_button = ttk.Button(button_container, text="Save", command=save_data)
+save_button.pack(side=tk.LEFT, padx=5)
+
+atexit.register(on_exit)
+
+update_frame()
+root.mainloop()
+
+rgb_cap.release()
+cv2.destroyAllWindows()
