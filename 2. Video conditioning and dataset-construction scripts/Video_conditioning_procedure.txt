@@ -1,0 +1,114 @@
+Video Frame Extraction, Tiling, and CVAT Annotation
+====================================================
+
+1. Extracting frames from video
+-------------------------------
+Frames were first extracted from the RGB video using FFmpeg:
+
+ffmpeg -i final_rgb_video.mp4 -vf fps=2 frames/frame_%06d.jpg
+
+This command reads the input video file final_rgb_video.mp4 and saves image frames at a rate of 2 frames per second. The extracted frames are written to the folder frames/ with filenames in zero-padded sequence format, for example:
+
+frame_000001.jpg
+frame_000002.jpg
+frame_000003.jpg
+
+The JPG format was used for compatibility with annotation workflows and to allow each sampled frame to be treated as an individual image during dataset preparation.
+
+
+2. Tiling the extracted frames (See make_tiles.py)
+------------------------------
+After extraction, each full-size frame was divided into smaller image tiles before annotation and model training. Tiling was used because firebrands occupy only a small number of pixels in the full frame, making them difficult to detect reliably if the whole image is used at once.
+
+Each frame was split into fixed-size square tiles, typically:
+
+640 x 640 pixels
+
+An overlap was also applied between adjacent tiles so that firebrands close to tile boundaries were not missed. A common choice was 25% overlap, giving a stride smaller than the tile width.
+
+The purpose of tiling was to:
+- enlarge the apparent size of small firebrands within each training image
+- improve annotation visibility
+- improve detector sensitivity to small objects
+- reduce the chance of objects being cut off at tile edges
+
+Each tile was then saved as a separate image file and used as an input for annotation or training.
+
+
+3. Annotation in CVAT
+---------------------
+The tiled images were annotated in CVAT (Computer Vision Annotation Tool):
+
+https://www.cvat.ai/
+
+In CVAT, the tiles were uploaded as an image-based annotation task rather than as a video task. Each firebrand visible in a tile was marked manually using bounding boxes.
+
+The annotation workflow was:
+- create a new task in CVAT
+- upload the tiled JPG images
+- define the object label, for example: firebrand
+- draw a bounding box around each visible firebrand
+- save the annotations across all selected tiles
+
+Bounding boxes were used because the object-detection model requires rectangular object locations rather than image-level class labels.
+
+
+4. Annotation file format
+-------------------------
+The annotations were exported from CVAT in YOLO object-detection format.
+
+In YOLO format, each image has a matching .txt annotation file with the same base filename as the image. For example:
+
+frame_000001_tile_01.jpg
+frame_000001_tile_01.txt
+
+Each line of the .txt file represents one annotated object and has the form:
+
+class_id x_center y_center width height
+
+These values are:
+- class_id: integer class number
+- x_center: normalised x-coordinate of the box centre
+- y_center: normalised y-coordinate of the box centre
+- width: normalised box width
+- height: normalised box height
+
+All coordinates are normalised between 0 and 1 relative to the image size.
+
+Example:
+0 0.512 0.438 0.041 0.067
+
+This means:
+- class 0
+- box centre at 51.2% of image width and 43.8% of image height
+- box width 4.1% of image width
+- box height 6.7% of image height
+
+If an image contains no objects, its annotation file is either empty or omitted depending on the dataset setup.
+
+
+5. Resulting dataset structure
+------------------------------
+A typical YOLO dataset produced from this workflow takes the form:
+
+dataset/
+  images/
+    train/
+    val/
+  labels/
+    train/
+    val/
+
+Each image in images/ has a corresponding YOLO .txt label file in labels/ with the same filename stem.
+
+
+6. Summary
+----------
+The overall workflow was:
+1. extract frames from video using FFmpeg
+2. divide full-size frames into overlapping tiles
+3. annotate tiled images in CVAT using bounding boxes
+4. export annotations in YOLO .txt format
+5. organise images and labels into the directory structure required for training
+
+This process enabled small airborne firebrands to be labelled more clearly and used effectively for YOLO-based object-detection training.
