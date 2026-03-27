@@ -33,5 +33,8 @@ Key differences
 ---------------
 The first two commands are for training, while the last two are for prediction. The first starts from default YOLO weights, the second starts from an already trained custom model, the third predicts on images, and the fourth predicts on video.
 
+
+For more documentation
+---------------
 https://docs.ultralytics.com/modes/predict/
 https://docs.ultralytics.com/modes/train/
