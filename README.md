@@ -68,97 +68,85 @@ The `Auxiliaries/` folder contains lightweight hardware test utilities used duri
 
 ## 2. Video conditioning and dataset-construction scripts
 
-These scripts convert raw recorded video into model-ready datasets for training and validation. Main processing steps include:
+These scripts convert recorded RGB video into YOLO-ready training and validation datasets. The workflow comprised:
 
 - frame extraction
 - spatial tiling
-- file organisation
-- preparation of training and validation data in YOLO format
+- manual annotation in CVAT
+- organisation into the standard YOLO directory structure
 
-### Main scripts
+### Main scripts and procedures
 
-- `frame_sampling.py`  
-  Extracts video frames at the selected sampling rate.
+- `FFmpeg` frame extraction  
+  RGB video was sampled at a fixed rate to generate sequential JPG frames for dataset preparation.
 
-- `tiling.py`  
-  Subdivides full-resolution frames into overlapping `640 × 640` tiles.
+- `make_tiles.py`  
+  Divides each `1920 × 1080` frame into fixed `640 × 640` tiles using overlapping tile positions, and sends every fifth frame to validation with the remainder assigned to training.
 
-- `dataset_builder.py`  
-  Organises tiled imagery and labels into the standard YOLO directory structure.
+- `CVAT` annotation  
+  Tiled images were annotated manually using bounding boxes in an image-based task.
 
-- `split_dataset.py`  
-  Generates training and validation subsets.
+- `YOLO` label export  
+  Annotations were exported in YOLO object-detection format and organised into matching `images/train`, `images/val`, `labels/train`, and `labels/val` folders.
 
 ---
 
 ## 3. YOLOv8 training and evaluation scripts
 
-These scripts and command blocks are used to train and evaluate the firebrand detector. They support both:
+These scripts and dataset configuration files are used to train and apply the YOLOv8 firebrand detector. The workflow included:
 
-- **Phase A** training on small-firebrand imagery
-- **Phase B** fine-tuning on the mixed-scale dataset
+- initial training of a new detector on SE2 laboratory imagery
+- continued training on a mixed dataset
+- inference on both still images and video
 
 ### Main scripts and files
 
 - `train_phaseA.py`  
-  Trains the initial small-firebrand detector.
+  Trains a new YOLOv8 detector initialised from COCO-pretrained `yolov8s.pt` weights.
 
 - `train_phaseB.py`  
-  Fine-tunes the model on the mixed-scale dataset.
+  Continues training from previously saved custom weights using `data_mixed.yaml`, corresponding to the mixed-scale dataset.
+
+- `data_new.yaml`  
+  YOLO dataset configuration file for the new SE2 laboratory training dataset.
 
 - `data_mixed.yaml`  
-  Dataset configuration file for YOLO training.
+  YOLO dataset configuration file for the mixed training dataset used in the later training stage.
 
-- `evaluate.py`  
-  Applies the trained detector to held-out imagery and records validation performance.
+- `data_small.yaml`  
+  YOLO dataset configuration file for the earlier small-firebrand dataset retained in the folder.
 
-### Typical YOLO commands
-
-Training and inference were carried out using command-line calls such as:
-
-```bash
-yolo detect train model=yolov8s.pt data=data_mixed.yaml imgsz=640 epochs=60 batch=16 device=0
-yolo detect predict model=runs/detect/train/weights/best.pt source=path/to/source imgsz=640 conf=0.5 device=0 save=True
-```
+- `YOLO` command-line inference  
+  Trained models were applied to folders of evaluation images and video files to generate annotated prediction outputs.
 
 ---
 
 ## 4. Post-processing and firebrand measurement scripts
 
-These scripts convert raw detector outputs into quantitative firebrand measurements suitable for interpretation and plotting. This stage includes:
-
-- tiled inference on full recordings
-- spatial deduplication of overlapping detections
-- reconstruction of frame timestamps
-- conversion of bounding-box dimensions into apparent size metrics
-- extraction of frame-level and summary statistics
-- generation of plots and CSV outputs for further analysis
+These scripts convert detector or tracking outputs into quantitative firebrand measurements, comparison metrics, and final plots. The folder contains one SE1 classical CV script and a set of SE2 YOLO-based post-processing scripts.
 
 ### Main scripts
 
-- `videoanalysis.py`  
-  Principal post-processing script for inference, deduplication, timestamp reconstruction, metric extraction, and output generation.
+- `SE1_Programs/video_analysis.py`  
+  SE1 classical CV tracking script used to analyse a single RGB video and export tracked firebrand measurements.
 
-- `deduplicate.py`  
-  Merges overlapping detections from adjacent image tiles into single full-frame detections.
+- `SE2_Programs/video_firebrand_measurement.py`  
+  Principal SE2 post-processing script for tile-based YOLO inference on full recordings, frame-level deduplication, timestamp reconstruction, apparent size extraction, and export of CSV, summary, and plot outputs.
 
-- `timestamp_align.py`  
-  Reconstructs frame timestamps relative to the GNSS-derived UTC anchor.
+- `SE2_Programs/video_firebrand_measurement_640x480.py`  
+  Variant of the main SE2 measurement script adapted for `640 × 480` video inputs.
 
-- `size_metrics.py`  
-  Converts bounding-box dimensions or areas into apparent projected size metrics.
+- `SE2_Programs/produce_cumulative_graph.py`  
+  Generates cumulative count and rolling-mean flux overlays from compiled recording outputs.
 
-- `plot_results.py`  
-  Generates plots of firebrand count, cumulative detections, rolling-mean trends, and apparent size distributions.
+- `SE2_Programs/plot_temporal_bbox_size_metrics.py`  
+  Plots the temporal evolution of mean bounding-box area in pixel and calibrated area units.
 
-### Typical post-processing outputs
+- `SE2_Programs/combined_firebrand_bbox_analysis.py`  
+  Combines detection outputs from multiple recordings to produce overall size-distribution statistics and percentile-based size plots.
 
-Depending on the script configuration, this stage can generate outputs such as:
+- `SE2_Programs/compare_detection_methods.py`  
+  Compares classical and ML-based detection results using metrics such as precision, recall, F1 score, and count error.
 
-- frame-by-frame firebrand counts
-- deduplicated detection records
-- reconstructed timestamps
-- cumulative detection curves
-- rolling-mean count plots
-- apparent size histograms
-- summary CSV and text files
+- `SE2_Programs/plot_cumulative_firebrand_comparison.py`  
+  Plots cumulative classical, ML, and manual firebrand counts on a single comparison figure.
