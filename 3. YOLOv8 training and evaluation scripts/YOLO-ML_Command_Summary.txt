@@ -1,0 +1,37 @@
+YOLO Command Summary
+====================
+
+1. Train a new model from default pretrained weights
+----------------------------------------------------
+yolo detect train model=yolov8n.pt data=data_new.yaml imgsz=640 epochs=60 batch=16 device=0
+
+This trains a new detector starting from the standard YOLOv8 nano pretrained weights using the dataset defined in data_new.yaml.
+
+
+2. Continue training from an existing custom model
+--------------------------------------------------
+yolo detect train model=runs/detect/train5/weights/best.pt data=data_mixed.yaml imgsz=640 epochs=60 batch=16 device=0
+
+This continues training from the previously saved best weights in train5, using a different dataset configuration in data_mixed.yaml.
+
+
+3. Run prediction on a folder of images
+---------------------------------------
+yolo detect predict model=runs/detect/train5/weights/best.pt source=dataset_eval/images/full_size imgsz=640 conf=0.5 device=0 save=True
+
+This applies the trained model to a set of still images and saves the annotated outputs.
+
+
+4. Run prediction on a video
+----------------------------
+yolo detect predict model=runs/detect/train5/weights/best.pt source=dataset_eval/videos/fire_test.mp4 imgsz=640 conf=0.5 device=0 save=True
+
+This applies the trained model to a video file and saves an annotated output video.
+
+
+Key differences
+---------------
+The first two commands are for training, while the last two are for prediction. The first starts from default YOLO weights, the second starts from an already trained custom model, the third predicts on images, and the fourth predicts on video.
+
+https://docs.ultralytics.com/modes/predict/
+https://docs.ultralytics.com/modes/train/
