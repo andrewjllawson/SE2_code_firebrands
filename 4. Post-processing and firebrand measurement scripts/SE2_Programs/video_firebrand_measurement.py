@@ -10,7 +10,7 @@ from ultralytics import YOLO
 # ---------------- USER CONFIG (only change these per experiment) ----------------
 
 # Name of the recording folder to analyse
-RECORDING_DIR_NAME = "recording_analysis_important"
+RECORDING_DIR_NAME = "recording_analysis_insert_here"
 
 # Path to the trained YOLO model weights
 MODEL_PATH = r"runs/detect/train5/weights/best.pt"
